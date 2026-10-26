@@ -58,7 +58,10 @@ jobs:
 
       - name: Configure and verify CR660x
         working-directory: openwrt
+        shell: bash
         run: |
+          set -euo pipefail
+
           cat > .config <<'EOF'
           CONFIG_TARGET_ramips=y
           CONFIG_TARGET_ramips_mt7621=y
@@ -68,7 +71,7 @@ jobs:
 
           make defconfig
 
-          disabled=(
+          disabled_packages=(
             luci-app-accesscontrol
             luci-app-arpbind
             luci-app-autoreboot
@@ -90,15 +93,26 @@ jobs:
             nping
           )
 
-          for package in "${disabled[@]}"; do
-            ./scripts/config --disable "DEFAULT_${package}"
-            ./scripts/config --disable "PACKAGE_${package}"
+          disable_symbol() {
+            local symbol="$1"
+            sed -i \
+              -e "/^${symbol}=.*/d" \
+              -e "/^# ${symbol} is not set$/d" \
+              .config
+            echo "# ${symbol} is not set" >> .config
+          }
+
+          for package in "${disabled_packages[@]}"; do
+            disable_symbol "CONFIG_DEFAULT_${package}"
+            disable_symbol "CONFIG_PACKAGE_${package}"
           done
 
           make defconfig
 
           echo "===== Selected target ====="
-          grep -E '^CONFIG_TARGET_ramips=y$|^CONFIG_TARGET_ramips_mt7621=y$|^CONFIG_TARGET_ramips_mt7621_DEVICE_xiaomi_mi-router-cr660x=y$' .config
+          grep -E \
+            '^CONFIG_TARGET_ramips=y$|^CONFIG_TARGET_ramips_mt7621=y$|^CONFIG_TARGET_ramips_mt7621_DEVICE_xiaomi_mi-router-cr660x=y$' \
+            .config
 
           echo "===== LuCI ====="
           grep '^CONFIG_PACKAGE_luci=y$' .config
@@ -106,42 +120,56 @@ jobs:
           echo "===== Enabled LuCI applications ====="
           grep '^CONFIG_PACKAGE_luci-app-.*=y$' .config || true
 
+          required_options=(
+            CONFIG_TARGET_ramips
+            CONFIG_TARGET_ramips_mt7621
+            CONFIG_TARGET_ramips_mt7621_DEVICE_xiaomi_mi-router-cr660x
+            CONFIG_PACKAGE_luci
+          )
+
           failed=0
 
-          for required in \
-            CONFIG_TARGET_ramips \
-            CONFIG_TARGET_ramips_mt7621 \
-            CONFIG_TARGET_ramips_mt7621_DEVICE_xiaomi_mi-router-cr660x \
-            CONFIG_PACKAGE_luci; do
-            if ! grep -qx "${required}=y" .config; then
-              echo "ERROR: ${required} is not enabled"
+          echo "===== Verify required options ====="
+          for option in "${required_options[@]}"; do
+            if grep -qx "${option}=y" .config; then
+              echo "OK: ${option}=y"
+            else
+              echo "ERROR: ${option} is not enabled"
               failed=1
             fi
           done
 
-          for package in "${disabled[@]}"; do
+          echo "===== Verify excluded packages ====="
+          for package in "${disabled_packages[@]}"; do
             if grep -qx "CONFIG_PACKAGE_${package}=y" .config; then
-              echo "ERROR: ${package} is still enabled"
+              echo "ERROR: ${package} was re-enabled by a dependency"
               failed=1
+            else
+              echo "OK: ${package} is disabled"
             fi
           done
 
-          if [ "$failed" -ne 0 ]; then
+          if [ "${failed}" -ne 0 ]; then
             echo "Configuration verification failed; build stopped."
             exit 1
           fi
 
           echo "Configuration verified successfully."
 
-      - name: Download sources
+      - name: Download sources using all CPUs
         working-directory: openwrt
+        shell: bash
         run: |
+          set -euo pipefail
+          echo "Downloading with $(nproc) parallel jobs"
           make download -j"$(nproc)"
           find dl -type f -size -1024c -print -delete || true
 
       - name: Build firmware using all CPUs
         working-directory: openwrt
+        shell: bash
         run: |
+          set -euo pipefail
           echo "Building with $(nproc) CPU threads"
           make -j"$(nproc)" V=s
 
