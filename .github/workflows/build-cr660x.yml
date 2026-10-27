@@ -12,7 +12,7 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: Checkout
+      - name: Checkout workflow repository
         uses: actions/checkout@v4
 
       - name: Free disk space
@@ -56,7 +56,7 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: Configure and verify CR660x
+      - name: Configure and verify before build
         working-directory: openwrt
         shell: bash
         run: |
@@ -67,69 +67,57 @@ jobs:
           CONFIG_TARGET_ramips_mt7621=y
           CONFIG_TARGET_ramips_mt7621_DEVICE_xiaomi_mi-router-cr660x=y
           CONFIG_PACKAGE_luci=y
+          CONFIG_TARGET_DEVICE_PACKAGES_ramips_mt7621_DEVICE_xiaomi_mi-router-cr660x="-coremark -curl -ddns-scripts -ddns-scripts-services -ddns-scripts_aliyun -ddns-scripts_dnspod -dns2tcp -etherwake -luci-app-accesscontrol -luci-app-arpbind -luci-app-autoreboot -luci-app-ddns -luci-app-filetransfer -luci-app-nlbwmon -luci-app-oui -luci-app-ssr-plus -luci-app-turboacc -luci-app-upnp -luci-app-vlmcsd -luci-app-vsftpd -luci-app-wol -miniupnpd-nftables -microsocks -ipt2socks -nlbwmon -nping -shellsync -vlmcsd -vsftpd"
           EOF
 
           make defconfig
-
-          disabled_packages=(
-            luci-app-accesscontrol
-            luci-app-arpbind
-            luci-app-autoreboot
-            luci-app-ddns
-            luci-app-filetransfer
-            luci-app-nlbwmon
-            luci-app-ssr-plus
-            luci-app-turboacc
-            luci-app-upnp
-            luci-app-vlmcsd
-            luci-app-vsftpd
-            luci-app-wol
-            coremark
-            vlmcsd
-            vsftpd
-            nlbwmon
-            microsocks
-            ipt2socks
-            nping
-          )
-
-          disable_symbol() {
-            local symbol="$1"
-            sed -i \
-              -e "/^${symbol}=.*/d" \
-              -e "/^# ${symbol} is not set$/d" \
-              .config
-            echo "# ${symbol} is not set" >> .config
-          }
-
-          for package in "${disabled_packages[@]}"; do
-            disable_symbol "CONFIG_DEFAULT_${package}"
-            disable_symbol "CONFIG_PACKAGE_${package}"
-          done
-
-          make defconfig
-
-          echo "===== Selected target ====="
-          grep -E \
-            '^CONFIG_TARGET_ramips=y$|^CONFIG_TARGET_ramips_mt7621=y$|^CONFIG_TARGET_ramips_mt7621_DEVICE_xiaomi_mi-router-cr660x=y$' \
-            .config
-
-          echo "===== LuCI ====="
-          grep '^CONFIG_PACKAGE_luci=y$' .config
-
-          echo "===== Enabled LuCI applications ====="
-          grep '^CONFIG_PACKAGE_luci-app-.*=y$' .config || true
 
           required_options=(
             CONFIG_TARGET_ramips
             CONFIG_TARGET_ramips_mt7621
             CONFIG_TARGET_ramips_mt7621_DEVICE_xiaomi_mi-router-cr660x
             CONFIG_PACKAGE_luci
+            CONFIG_PACKAGE_kmod-mt7915e
+            CONFIG_PACKAGE_kmod-mt7915-firmware
+            CONFIG_PACKAGE_wpad-openssl
+            CONFIG_PACKAGE_uboot-envtools
+          )
+
+          excluded_packages=(
+            coremark
+            curl
+            ddns-scripts
+            ddns-scripts-services
+            ddns-scripts_aliyun
+            ddns-scripts_dnspod
+            dns2tcp
+            etherwake
+            luci-app-accesscontrol
+            luci-app-arpbind
+            luci-app-autoreboot
+            luci-app-ddns
+            luci-app-filetransfer
+            luci-app-nlbwmon
+            luci-app-oui
+            luci-app-ssr-plus
+            luci-app-turboacc
+            luci-app-upnp
+            luci-app-vlmcsd
+            luci-app-vsftpd
+            luci-app-wol
+            miniupnpd-nftables
+            microsocks
+            ipt2socks
+            nlbwmon
+            nping
+            shellsync
+            vlmcsd
+            vsftpd
           )
 
           failed=0
 
-          echo "===== Verify required options ====="
+          echo "===== Required configuration ====="
           for option in "${required_options[@]}"; do
             if grep -qx "${option}=y" .config; then
               echo "OK: ${option}=y"
@@ -139,22 +127,29 @@ jobs:
             fi
           done
 
-          echo "===== Verify excluded packages ====="
-          for package in "${disabled_packages[@]}"; do
-            if grep -qx "CONFIG_PACKAGE_${package}=y" .config; then
-              echo "ERROR: ${package} was re-enabled by a dependency"
-              failed=1
+          echo "===== Device package exclusions ====="
+          device_packages="$(sed -n 's/^CONFIG_TARGET_DEVICE_PACKAGES_ramips_mt7621_DEVICE_xiaomi_mi-router-cr660x="\(.*\)"$/\1/p' .config)"
+
+          if [ -z "${device_packages}" ]; then
+            echo "ERROR: device package exclusion list is missing"
+            failed=1
+          fi
+
+          for package in "${excluded_packages[@]}"; do
+            if printf '%s\n' "${device_packages}" | tr ' ' '\n' | grep -Fqx -- "-${package}"; then
+              echo "OK: -${package}"
             else
-              echo "OK: ${package} is disabled"
+              echo "ERROR: -${package} is missing from device exclusions"
+              failed=1
             fi
           done
 
           if [ "${failed}" -ne 0 ]; then
-            echo "Configuration verification failed; build stopped."
+            echo "Pre-build configuration verification failed."
             exit 1
           fi
 
-          echo "Configuration verified successfully."
+          echo "Pre-build configuration verified successfully."
 
       - name: Download sources using all CPUs
         working-directory: openwrt
@@ -173,10 +168,77 @@ jobs:
           echo "Building with $(nproc) CPU threads"
           make -j"$(nproc)" V=s
 
+      - name: Verify firmware after build
+        working-directory: openwrt
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          target_dir="bin/targets/ramips/mt7621"
+          manifest="$(find "${target_dir}" -maxdepth 1 -type f -name '*cr660x*.manifest' -print -quit)"
+
+          if [ -z "${manifest}" ]; then
+            echo "ERROR: CR660x manifest not found"
+            exit 1
+          fi
+
+          forbidden_packages=(
+            coremark curl ddns-scripts ddns-scripts-services
+            ddns-scripts_aliyun ddns-scripts_dnspod dns2tcp etherwake
+            luci-app-accesscontrol luci-app-arpbind luci-app-autoreboot
+            luci-app-ddns luci-app-filetransfer luci-app-nlbwmon
+            luci-app-oui luci-app-ssr-plus luci-app-turboacc
+            luci-app-upnp luci-app-vlmcsd luci-app-vsftpd luci-app-wol
+            miniupnpd-nftables microsocks ipt2socks nlbwmon nping
+            shellsync vlmcsd vsftpd
+          )
+
+          required_packages=(
+            base-files busybox dnsmasq-full dropbear firewall4 luci
+            luci-app-firewall kmod-mt7915e kmod-mt7915-firmware
+            wpad-openssl uboot-envtools
+          )
+
+          failed=0
+
+          echo "===== Forbidden packages ====="
+          for package in "${forbidden_packages[@]}"; do
+            if awk -v pkg="${package}" '$1 == pkg { found=1 } END { exit !found }' "${manifest}"; then
+              echo "ERROR: ${package} exists in firmware"
+              failed=1
+            else
+              echo "OK: ${package} is absent"
+            fi
+          done
+
+          echo "===== Required packages ====="
+          for package in "${required_packages[@]}"; do
+            if awk -v pkg="${package}" '$1 == pkg { found=1 } END { exit !found }' "${manifest}"; then
+              echo "OK: ${package} exists"
+            else
+              echo "ERROR: required package ${package} is missing"
+              failed=1
+            fi
+          done
+
+          factory="$(find "${target_dir}" -maxdepth 1 -type f -name '*cr660x*factory.bin' -print -quit)"
+          sysupgrade="$(find "${target_dir}" -maxdepth 1 -type f -name '*cr660x*sysupgrade.bin' -print -quit)"
+
+          [ -n "${factory}" ] || { echo "ERROR: factory image is missing"; failed=1; }
+          [ -n "${sysupgrade}" ] || { echo "ERROR: sysupgrade image is missing"; failed=1; }
+
+          if [ "${failed}" -ne 0 ]; then
+            echo "Firmware verification failed."
+            exit 1
+          fi
+
+          echo "OK: factory image exists"
+          echo "OK: sysupgrade image exists"
+          echo "Firmware verified successfully."
+
       - name: Collect firmware
         run: |
           mkdir -p firmware
-
           find openwrt/bin/targets/ramips/mt7621 \
             -maxdepth 1 -type f \
             \( -name '*cr660x*.bin' \
@@ -184,15 +246,10 @@ jobs:
             -o -name 'sha256sums' \
             -o -name 'profiles.json' \) \
             -exec cp -v {} firmware/ \;
-
           cp openwrt/.config firmware/config.txt
-
-          echo "===== Firmware files ====="
           ls -lh firmware
 
-          test -n "$(find firmware -type f -name '*cr660x*.bin' -print -quit)"
-
-      - name: Upload firmware
+      - name: Upload verified firmware
         uses: actions/upload-artifact@v4
         with:
           name: Lean-LEDE-CR660x
