@@ -114,7 +114,7 @@ jobs:
         working-directory: openwrt
         run: |
           echo "Building with $(nproc) CPU threads"
-          make -j"$(nproc)" V=s
+          make -j"$(nproc)"
 
       - name: Collect firmware
         run: |
