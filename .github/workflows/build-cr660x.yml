@@ -166,7 +166,7 @@ jobs:
         run: |
           set -euo pipefail
           echo "Building with $(nproc) CPU threads"
-          make -j"$(nproc)" V=s
+          make -j"$(nproc)"
 
       - name: Verify firmware after build
         working-directory: openwrt
